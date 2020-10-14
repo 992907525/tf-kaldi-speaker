@@ -16,44 +16,64 @@
 . ./path.sh
 set -e
 
-root=/home/heliang05/liuyi/voxceleb.official
+root=/data2/user/lpq/voxceleb.official.official
 data=$root/data
 exp=$root/exp
 mfccdir=$root/mfcc
 vaddir=$root/mfcc
 
-stage=5
+stage=0
 
 # The kaldi voxceleb egs directory
-kaldi_voxceleb=/home/heliang05/liuyi/software/kaldi_gpu/egs/voxceleb
-
-voxceleb1_trials=$data/voxceleb_test/trials
-voxceleb1_root=/home/heliang05/liuyi/data/voxceleb/voxceleb1
-voxceleb2_root=/home/heliang05/liuyi/data/voxceleb/voxceleb2
-musan_root=/home/heliang05/liuyi/data/musan
-rirs_root=/home/heliang05/liuyi/data/RIRS_NOISES
+kaldi_sre=/data2/user/lpq/kaldi/egs/sre16/exp1
+train_wav_div=/data2/user/lpq/aishell2_8k/wav
+# voxceleb1_trials=$data/voxceleb_test/trials
+# voxceleb1_root=/home/heliang05/liuyi/data/voxceleb/voxceleb1
+# voxceleb2_root=/home/heliang05/liuyi/data/voxceleb/voxceleb2
+# musan_root=/home/heliang05/liuyi/data/musan
+# rirs_root=/home/heliang05/liuyi/data/RIRS_NOISES
 
 if [ $stage -le -1 ]; then
     # link the directories
     rm -fr utils steps sid conf local
-    ln -s $kaldi_voxceleb/v2/utils ./
-    ln -s $kaldi_voxceleb/v2/steps ./
-    ln -s $kaldi_voxceleb/v2/sid ./
-    ln -s $kaldi_voxceleb/v2/conf ./
-    ln -s $kaldi_voxceleb/v2/local ./
+    ln -s $kaldi_sre/utils ./
+    ln -s $kaldi_sre/steps ./
+    ln -s $kaldi_sre/sid ./
+    ln -s $kaldi_sre/conf ./
+    ln -s $kaldi_sre/local ./
 
     ln -s ../../voxceleb/v1/nnet ./
     exit 1
 fi
 
+# #############################################################################
+# train step :step 0-5
+# experiment 1 : The x-vector network and LDA and PLDA models were trained with the training set during the training
+# #############################################################################
+# 0. prepare data
 if [ $stage -le 0 ]; then
-  local/make_voxceleb2.pl $voxceleb2_root dev $data/voxceleb2_train
-  local/make_voxceleb1.pl $voxceleb1_root $data
-fi
+echo "[$(date '+%y%m%d %H%M%S')] 00. [start] prepare wave data sets."
+if [ -d $data/train ]; then rm -rf $data/train || exit 1; fi
+mkdir -p $data/{train,dev,test} || exit
+python local/data_prep_train.py $train_wav_div $data/train/wav.scp $data/train/utt2spk $data/train/spk2utt
+# 准备服务器中现有的跨信道dev集和test集，dev5人，test10人
+# python local/data_prep_devset.py  $sec_dev_dir $data/dev/wav.scp $data/dev/utt2spk $data/dev/spk2utt
+# python local/data_prep_testset.py $sec_test_dir $data/test/wav.scp $data/test/utt2spk $data/test/spk2utt
+for sub_dir in train
+do
+    dir=$data/$sub_dir
+    for file in wav.scp utt2spk spk2utt
+    do
+        sort -k1 $dir/$file > temp
+        mv temp $dir/$file
+    done
+done
+echo "[$(date '+%y%m%d %H%M%S')] 00. [end] prepare wave data sets."
+fi # stage 0
 
 if [ $stage -le 1 ]; then
   # Make MFCCs and compute the energy-based VAD for each dataset
-  for name in voxceleb2_train voxceleb1_test; do
+  for name in $data/train ; do
     steps/make_mfcc.sh --write-utt2num-frames true --mfcc-config conf/mfcc.conf --nj 40 --cmd "$train_cmd" \
       $data/${name} $exp/make_mfcc $mfccdir
     utils/fix_data_dir.sh $data/${name}
@@ -62,47 +82,71 @@ if [ $stage -le 1 ]; then
     utils/fix_data_dir.sh $data/${name}
   done
 
-  cp -r $data/voxceleb2_train $data/voxceleb_train
-  cp -r $data/voxceleb1_test $data/voxceleb_test
-  exit 1
+  # exit 1
 fi
 
 # Without augmentation
-
-# Now we prepare the features to generate examples for xvector training.
+# 2. prepare features for xvector training.
 if [ $stage -le 2 ]; then
-  local/nnet3/xvector/prepare_feats_for_egs.sh --nj 40 --cmd "$train_cmd" \
-    $data/voxceleb_train $data/voxceleb_train_no_sil $exp/voxceleb_train_no_sil
-  utils/fix_data_dir.sh $data/voxceleb_train_no_sil
-  cp -r $data/voxceleb_train_no_sil $data/voxceleb_train_no_sil.bak
-  exit 1
+echo "[$(date '+%y%m%d %H%M%S')] 02. [start] preapre features."
+
+# Applies CMVN and removes nonspeech frames.
+local/nnet3/xvector/prepare_feats_for_egs.sh --nj 12 --cmd "$train_cmd" \
+  $data/train $data/train_no_sil exp/train_no_sil
+
+utils/fix_data_dir.sh $data/train_no_sil
+utils/data/get_utt2num_frames.sh --nj 12 --cmd "$train_cmd" data/train_no_sil
+utils/fix_data_dir.sh $data/train_no_sil
+
+# remove features that are too short after removing silence frames.
+# we want atleast 1s (100 frames) per utterance.
+min_len=100
+mv $data/train_no_sil/utt2num_frames $data/train_no_sil/utt2num_frames.bak
+awk -v min_len=$min_len '$2 >= min_len {print $1, $2}' \
+  $data/train_no_sil/utt2num_frames.bak > $data/train_no_sil/utt2num_frames
+utils/filter_scp.pl $data/train_no_sil/utt2num_frames $data/train_no_sil/utt2spk > $data/train_no_sil/utt2spk.new
+mv $data/train_no_sil/utt2spk.new $data/train_no_sil/utt2spk
+utils/fix_data_dir.sh $data/train_no_sil
+
+# utils/fix_data_dir.sh $data/train_no_sil
+
+echo "[$(date '+%y%m%d %H%M%S')] 02. [end] preapre features."
 fi
+# Now we prepare the features to generate examples for xvector training.
+# if [ $stage -le 2 ]; then
+#   local/nnet3/xvector/prepare_feats_for_egs.sh --nj 40 --cmd "$train_cmd" \
+#     $data/train $data/train_no_sil $exp/train_no_sil
+#   utils/fix_data_dir.sh $data/voxceleb_train_no_sil
+#   # cp -r $data/voxceleb_train_no_sil $data/voxceleb_train_no_sil.bak
+#   # exit 1
+# fi
 
-if [ $stage -le 3 ]; then
-  # Now, we need to remove features that are too short after removing silence
-  # frames.  We want atleast 5s (500 frames) per utterance.
-  min_len=400
-  mv $data/voxceleb_train_no_sil/utt2num_frames $data/voxceleb_train_no_sil/utt2num_frames.bak
-  awk -v min_len=${min_len} '$2 > min_len {print $1, $2}' $data/voxceleb_train_no_sil/utt2num_frames.bak > $data/voxceleb_train_no_sil/utt2num_frames
-  utils/filter_scp.pl $data/voxceleb_train_no_sil/utt2num_frames $data/voxceleb_train_no_sil/utt2spk > $data/voxceleb_train_no_sil/utt2spk.new
-  mv $data/voxceleb_train_no_sil/utt2spk.new $data/voxceleb_train_no_sil/utt2spk
-  utils/fix_data_dir.sh $data/voxceleb_train_no_sil
+# if [ $stage -le 3 ]; then
+#   # Now, we need to remove features that are too short after removing silence
+#   # frames.  We want atleast 5s (500 frames) per utterance.
+#   min_len=400
+#   mv $data/voxceleb_train_no_sil/utt2num_frames $data/voxceleb_train_no_sil/utt2num_frames.bak
+#   awk -v min_len=${min_len} '$2 > min_len {print $1, $2}' $data/voxceleb_train_no_sil/utt2num_frames.bak > $data/voxceleb_train_no_sil/utt2num_frames
+#   utils/filter_scp.pl $data/voxceleb_train_no_sil/utt2num_frames $data/voxceleb_train_no_sil/utt2spk > $data/voxceleb_train_no_sil/utt2spk.new
+#   mv $data/voxceleb_train_no_sil/utt2spk.new $data/voxceleb_train_no_sil/utt2spk
+#   utils/fix_data_dir.sh $data/voxceleb_train_no_sil
 
-  # We also want several utterances per speaker. Now we'll throw out speakers
-  # with fewer than 8 utterances.
-  min_num_utts=8
-  awk '{print $1, NF-1}' $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/spk2num
-  awk -v min_num_utts=${min_num_utts} '$2 >= min_num_utts {print $1, $2}' $data/voxceleb_train_no_sil/spk2num | utils/filter_scp.pl - $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/spk2utt.new
-  mv $data/voxceleb_train_no_sil/spk2utt.new $data/voxceleb_train_no_sil/spk2utt
-  utils/spk2utt_to_utt2spk.pl $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/utt2spk
+#   # We also want several utterances per speaker. Now we'll throw out speakers
+#   # with fewer than 8 utterances.
+#   min_num_utts=8
+#   awk '{print $1, NF-1}' $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/spk2num
+#   awk -v min_num_utts=${min_num_utts} '$2 >= min_num_utts {print $1, $2}' $data/voxceleb_train_no_sil/spk2num | utils/filter_scp.pl - $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/spk2utt.new
+#   mv $data/voxceleb_train_no_sil/spk2utt.new $data/voxceleb_train_no_sil/spk2utt
+#   utils/spk2utt_to_utt2spk.pl $data/voxceleb_train_no_sil/spk2utt > $data/voxceleb_train_no_sil/utt2spk
 
-  utils/filter_scp.pl $data/voxceleb_train_no_sil/utt2spk $data/voxceleb_train_no_sil/utt2num_frames > $data/voxceleb_train_no_sil/utt2num_frames.new
-  mv $data/voxceleb_train_no_sil/utt2num_frames.new $data/voxceleb_train_no_sil/utt2num_frames
+#   utils/filter_scp.pl $data/voxceleb_train_no_sil/utt2spk $data/voxceleb_train_no_sil/utt2num_frames > $data/voxceleb_train_no_sil/utt2num_frames.new
+#   mv $data/voxceleb_train_no_sil/utt2num_frames.new $data/voxceleb_train_no_sil/utt2num_frames
 
-  # Now we're ready to create training examples.
-  utils/fix_data_dir.sh $data/voxceleb_train_no_sil
-  exit 1
-fi
+#   # Now we're ready to create training examples.
+#   utils/fix_data_dir.sh $data/voxceleb_train_no_sil
+#   exit 1
+# fi
+<<COMMENT
 
 if [ $stage -le 4 ]; then
   # Split the validation set

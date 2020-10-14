@@ -47,13 +47,13 @@ if [ $stage -le -1 ]; then
 fi
 
 if [ $stage -le 0 ]; then
-  local/make_voxceleb2.pl $voxceleb2_root dev $data/voxceleb2_train
-  local/make_voxceleb1.pl $voxceleb1_root $data
+# 这一部分修改位训练集的数据准备
   exit 1
 fi
 
 if [ $stage -le 1 ]; then
-  # Make MFCCs and compute the energy-based VAD for each dataset
+  # Make MFCCs and compute the energy-based VAD for each train set
+
   for name in voxceleb2_train voxceleb1_test; do
     steps/make_mfcc.sh --write-utt2num-frames true --mfcc-config conf/mfcc.conf --nj 40 --cmd "$train_cmd" \
       $data/${name} $exp/make_mfcc $mfccdir
@@ -69,6 +69,8 @@ if [ $stage -le 1 ]; then
 fi
 
 if [ $stage -le 2 ]; then
+  #我们在这一步 不需要做数据增强
+
   frame_shift=0.01
   awk -v frame_shift=$frame_shift '{print $1, $2*frame_shift;}' $data/voxceleb_train/utt2num_frames > $data/voxceleb_train/reco2dur
 
@@ -115,6 +117,9 @@ if [ $stage -le 2 ]; then
 fi
 
 if [ $stage -le 3 ]; then
+
+  # 给数据增强的 voxceleb_train_aug 的文件夹 做特征提取，我们不需要此步
+
   # Take a random subset of the augmentations
   utils/subset_data_dir.sh $data/voxceleb_train_aug 1000000 $data/voxceleb_train_aug_1m
   utils/fix_data_dir.sh $data/voxceleb_train_aug_1m
@@ -132,6 +137,9 @@ if [ $stage -le 3 ]; then
 fi
 
 if [ $stage -le 4 ]; then
+
+# 需要修改；这一步是为egs准备 features 要注意参数和上面的接轨。参考之前的 项目即可
+
   local/nnet3/xvector/prepare_feats_for_egs.sh --nj 40 --cmd "$train_cmd" \
     $data/voxceleb_train_combined $data/voxceleb_train_combined_no_sil $exp/voxceleb_train_combined_no_sil
   utils/fix_data_dir.sh $data/voxceleb_train_combined_no_sil
@@ -140,6 +148,7 @@ if [ $stage -le 4 ]; then
 fi
 
 if [ $stage -le 5 ]; then
+  # 为训练模型挑选一些符合条件的语音特征，这一步也需要修改。参考之前的项目即可
   # Now, we need to remove features that are too short after removing silence
   # frames.  We want atleast 5s (500 frames) per utterance.
   min_len=400
